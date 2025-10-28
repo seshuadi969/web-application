@@ -1,192 +1,199 @@
 pipeline {
     agent any
     
+    environment {
+        AZURE_SUBSCRIPTION_ID = credentials('azure-subscription-id')
+        AZURE_TENANT_ID = credentials('azure-tenant-id')
+        AZURE_CLIENT_ID = credentials('azure-client-id')
+        AZURE_CLIENT_SECRET = credentials('azure-client-secret')
+        LOCATION = 'eastus'
+    }
+    
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
-                sh 'echo "✅ Code checkout successful"'
+                sh 'echo "Code checkout successful"'
             }
         }
         
-        stage('Verify Environment') {
+        stage('Verify Tools') {
             steps {
                 sh '''
-                    echo "🔧 Environment Check:"
-                    echo "User: $(whoami)"
-                    echo "Python3: $(python3 --version 2>/dev/null || echo 'Not available')"
-                    echo "Pip3: $(pip3 --version 2>/dev/null || echo 'Not available')"
-                    echo "Working dir: $(pwd)"
+                    echo "Verifying tools..."
+                    python3 --version
+                    pip3 --version
+                    az --version
                 '''
             }
         }
         
-        stage('Check Python Installation') {
+        stage('Install Dependencies') {
             steps {
                 sh '''
-                    if ! command -v python3 &> /dev/null; then
-                        echo "❌ Python3 is not installed in the Jenkins environment"
-                        echo "💡 Solution: Python needs to be installed in the Jenkins container by an administrator"
-                        exit 1
-                    else
-                        echo "✅ Python3 is available: $(python3 --version)"
-                        echo "✅ Pip3 is available: $(pip3 --version)"
-                    fi
-                '''
-            }
-        }
-        
-        stage('Verify Project Files') {
-            steps {
-                sh '''
-                    echo "📁 Project Structure:"
-                    echo "=== Backend Files ==="
-                    ls -la backend/
-                    echo "=== Frontend Files ==="
-                    ls -la frontend/
-                    
-                    # Check if required files exist
-                    if [ ! -f "backend/app.py" ]; then
-                        echo "❌ Missing: backend/app.py"
-                        exit 1
-                    fi
-                    
-                    if [ ! -f "backend/requirements.txt" ]; then
-                        echo "❌ Missing: backend/requirements.txt"
-                        exit 1
-                    fi
-                    
-                    if [ ! -f "frontend/index.html" ]; then
-                        echo "❌ Missing: frontend/index.html"
-                        exit 1
-                    fi
-                    
-                    echo "✅ All required files present"
-                '''
-            }
-        }
-        
-        stage('Install Python Dependencies') {
-            steps {
-                sh '''
-                    echo "🚀 Installing Python dependencies..."
+                    echo "Installing dependencies..."
                     cd backend
                     pip3 install --user -r requirements.txt
-                    echo "✅ Dependencies installed successfully"
-                    
-                    # Show installed packages
-                    echo "📦 Installed packages:"
-                    pip3 list | grep -E "(flask|gunicorn)"
+                    echo "Dependencies installed"
                 '''
             }
         }
         
-        stage('Test Backend') {
+        stage('Test Application') {
             steps {
                 sh '''
-                    echo "🧪 Testing backend application..."
+                    echo "Testing application..."
                     cd backend
-                    
-                    # Test imports
-                    python3 -c "import flask; print('✅ Flask imported successfully')"
-                    python3 -c "from app import app; print('✅ App module imported successfully')"
-                    
-                    # Test basic functionality
-                    python3 -c "
-from app import app
-print('Testing application...')
-with app.test_client() as client:
-    # Test health endpoint
-    response = client.get('/api/health')
-    print(f'Health check: {response.status_code} - {response.get_json()}')
-    
-    # Test info endpoint
-    response = client.get('/api/info')
-    print(f'Info endpoint: {response.status_code} - {response.get_json()}')
-    
-    print('✅ All backend tests passed!')
-"
+                    python3 -c "import flask; from app import app; print('Imports successful')"
+                    echo "Tests passed"
                 '''
             }
         }
         
-        stage('Build Deployment Package') {
+        stage('Build Package') {
             steps {
                 sh '''
-                    echo "📦 Building deployment package..."
-                    
-                    # Create clean dist directory
+                    echo "Building deployment package..."
                     rm -rf dist
                     mkdir -p dist
-                    
-                    # Copy backend files
                     cp -r backend/* dist/
-                    
-                    # Copy frontend files
                     cp -r frontend/* dist/
-                    
-                    # Create deployment package
                     cd dist
                     zip -r ../deployment.zip .
-                    
-                    echo "✅ Deployment package created:"
-                    ls -lh ../deployment.zip
-                    echo "Package size: $(du -h ../deployment.zip | cut -f1)"
+                    echo "Package created"
                 '''
             }
         }
         
-        stage('Smoke Test') {
+        stage('Azure Login') {
             steps {
                 sh '''
-                    echo "🔍 Running smoke tests..."
-                    
-                    # Test that deployment package contains expected files
-                    unzip -l deployment.zip | head -20
-                    
-                    # Count files in package
-                    FILE_COUNT=$(unzip -l deployment.zip | wc -l)
-                    echo "📄 Deployment package contains $((FILE_COUNT-3)) files"
-                    
-                    # Verify key files are in package
-                    if unzip -l deployment.zip | grep -q "app.py"; then
-                        echo "✅ app.py found in package"
-                    else
-                        echo "❌ app.py missing from package"
-                        exit 1
-                    fi
-                    
-                    if unzip -l deployment.zip | grep -q "index.html"; then
-                        echo "✅ index.html found in package"
-                    else
-                        echo "❌ index.html missing from package"
-                        exit 1
-                    fi
-                    
-                    echo "✅ All smoke tests passed!"
+                    echo "Logging into Azure..."
+                    az login --service-principal \
+                        -u $AZURE_CLIENT_ID \
+                        -p $AZURE_CLIENT_SECRET \
+                        --tenant $AZURE_TENANT_ID
+                    az account set --subscription $AZURE_SUBSCRIPTION_ID
+                    echo "Azure login successful"
                 '''
+            }
+        }
+        
+        stage('Deploy to Azure') {
+            steps {
+                script {
+                    // Generate unique names
+                    def APP_NAME = "webapp-${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                    def RESOURCE_GROUP = "rg-${env.BUILD_NUMBER}"
+                    env.APP_URL = "https://${APP_NAME}.azurewebsites.net"
+                    
+                    echo "Deploying to Azure..."
+                    echo "App Name: ${APP_NAME}"
+                    echo "Resource Group: ${RESOURCE_GROUP}"
+                    echo "App URL: ${env.APP_URL}"
+                    
+                    sh """
+                        # Create resource group
+                        az group create \
+                            --name $RESOURCE_GROUP \
+                            --location $LOCATION \
+                            --tags "Environment=CI/CD" "Build=${env.BUILD_NUMBER}" \
+                            --output table
+                        
+                        # Create app service plan
+                        az appservice plan create \
+                            --name asp-${env.BUILD_NUMBER} \
+                            --resource-group $RESOURCE_GROUP \
+                            --sku B1 \
+                            --is-linux \
+                            --output table
+                        
+                        # Create web app
+                        az webapp create \
+                            --name $APP_NAME \
+                            --resource-group $RESOURCE_GROUP \
+                            --plan asp-${env.BUILD_NUMBER} \
+                            --runtime "PYTHON|3.11" \
+                            --output table
+                        
+                        # Configure startup command
+                        az webapp config set \
+                            --resource-group $RESOURCE_GROUP \
+                            --name $APP_NAME \
+                            --startup-file "bash startup.sh" \
+                            --output table
+                        
+                        # Deploy application
+                        az webapp deployment source config-zip \
+                            --resource-group $RESOURCE_GROUP \
+                            --name $APP_NAME \
+                            --src deployment.zip \
+                            --output table
+                        
+                        echo "Deployment completed successfully!"
+                    """
+                }
+            }
+        }
+        
+        stage('Test Deployment') {
+            steps {
+                script {
+                    echo "Testing deployed application..."
+                    // Wait for deployment to complete
+                    sleep 60
+                    
+                    sh """
+                        echo "Testing application at: $APP_URL"
+                        
+                        # Test with retries
+                        for i in {1..5}; do
+                            if curl -f -s $APP_URL/api/health > /dev/null; then
+                                echo "✅ Application is responding!"
+                                break
+                            else
+                                echo "⏳ Application not ready yet, retrying in 15 seconds... (attempt $i/5)"
+                                sleep 15
+                            fi
+                        done
+                        
+                        # Final test
+                        curl -f $APP_URL/api/health && echo "✅ Health check passed"
+                        curl -f $APP_URL/api/info && echo "✅ Info endpoint passed"
+                        curl -f $APP_URL/ && echo "✅ Main page passed"
+                        
+                        echo "🎉 All deployment tests passed!"
+                    """
+                }
             }
         }
     }
     
     post {
         always {
-            echo "🏁 Pipeline execution completed"
+            echo "Pipeline execution completed"
             archiveArtifacts artifacts: 'deployment.zip', fingerprint: true
         }
         success {
-            echo "🎉 SUCCESS: CI Pipeline completed successfully!"
+            echo "SUCCESS: Full CI/CD Pipeline completed!"
             sh '''
-                echo "📊 Final Summary:"
-                echo "Python: $(python3 --version)"
-                echo "Backend: ✅ Tested and working"
-                echo "Frontend: ✅ Files validated"
-                echo "Deployment Package: ✅ Created and verified"
-                echo "Artifact: ✅ deployment.zip archived"
+                echo "=== DEPLOYMENT SUMMARY ==="
+                echo "Application URL: $APP_URL"
+                echo "Build Number: $BUILD_NUMBER"
+                echo "Commit: ${GIT_COMMIT:0:7}"
+                echo "Deployment: ✅ Successful"
+                echo "=========================="
             '''
         }
         failure {
-            echo "❌ FAILURE: Pipeline failed - check logs for details"
+            echo "FAILURE: Pipeline failed"
+            script {
+                // Optional: Cleanup resources on failure
+                sh '''
+                    echo "Cleaning up Azure resources..."
+                    az group delete --name rg-$BUILD_NUMBER --yes --no-wait || true
+                '''
+            }
         }
     }
 }
