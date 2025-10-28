@@ -1,0 +1,40 @@
+name: Deploy to Azure App Service
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        cd backend
+        pip install -r requirements.txt
+
+    - name: Create deployment package
+      run: |
+        mkdir -p deployment
+        cp -r backend/* deployment/
+        cp -r frontend/* deployment/
+        cd deployment && zip -r ../deployment.zip .
+
+    - name: Deploy to Azure App Service
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ secrets.AZURE_APP_NAME }}
+        publish-profile: ${{ secrets.AZURE_APPSERVICE_PUBLISH_PROFILE }}
+        package: deployment.zip
